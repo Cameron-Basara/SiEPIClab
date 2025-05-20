@@ -3,6 +3,12 @@ from thorlabs_apt_device import BSC
 import re
 import math
 
+"""
+Module defines a BSC203 motor class designed to interface with the thorlabs bsc203 steper motor controller.
+
+    - Handles connection, movement in xyz, position limits, simple state tracking  
+
+"""
 
 class BSC203Motor:
     name = 'BSC203'
@@ -28,7 +34,11 @@ class BSC203Motor:
         self.theta = 0
 
     def connect(self, SerialPortName, NumberOfAxis):
-        self.visaName = SerialPortName
+        """ 
+            Connect to the BSC using driver https://thorlabs-apt-device.readthedocs.io/en/stable/_modules/thorlabs_apt_device/devices/bsc.html
+
+        """
+        self.visaName = SerialPortName # Started abstraction, don't know why
         numbers = re.findall('[0-9]+', SerialPortName)
         COM = "COM" + numbers[0]
         self.bsc = BSC(serial_port=COM, x=NumberOfAxis, home=False)
@@ -46,67 +56,113 @@ class BSC203Motor:
         self.bsc.close()
 
     def moveRelativeXYZ(self, x, y, z):
-        if self.minPositionSet is False and self.maxZPositionSet is False:
+        """
+        Moves the BSC203 motor a relative amount in the X, Y, and Z directions,
+        while enforcing optional safety constraints such as minimum X and maximum Z limits.
+
+        Parameters:
+            x (float): Relative movement in the X-axis (positive or negative, in mm).
+            y (float): Relative movement in the Y-axis (in mm).
+            z (float): Relative movement in the Z-axis (in mm).
+
+        Behavior:
+            - Movement is scaled by 1000 for device communication. Movement is in encoder steps
+            - If limits are not set, all movement is allowed.
+            - If min X position is set, restricts leftward X movement past the defined minimum.
+            - If max Z position is set, prevents lateral movement when Z is below a safe threshold.
+            - Tracks software-estimated position and optional calibration values.
+            - Issues user warnings in unsafe or restricted conditions.
+        """
+
+        # Case 1: No movement limits are enforced
+        if not self.minPositionSet and not self.maxZPositionSet:
+            # Perform full XYZ movement
             self.bsc.move_relative(distance=int(1000 * x), bay=0, channel=0)
             self.bsc.move_relative(distance=int(1000 * y), bay=1, channel=0)
             self.bsc.move_relative(distance=int(1000 * z), bay=2, channel=0)
-            self.position[0] = self.position[0] - x
-            self.position[1] = self.position[1] - y
-            self.position[2] = self.position[2] - z
+
+            # Update software position tracking
+            self.position[0] -= x
+            self.position[1] -= y
+            self.position[2] -= z
+
+            # Accumulate displacement in calibration banks if flag is set
             if self.calflag:
-                self.ybank = self.ybank + y
-                self.xbank = self.xbank + x
-        elif self.minPositionSet is True and self.maxZPositionSet is False:
+                self.xbank += x
+                self.ybank += y
+
+        # Case 2: Only minimum X limit is enforced
+        elif self.minPositionSet and not self.maxZPositionSet:
             if self.position[0] - x < self.minXPosition:
                 print("Cannot Move Past Minimum X Position.")
             else:
                 self.bsc.move_relative(distance=int(1000 * x), bay=0, channel=0)
                 self.bsc.move_relative(distance=int(1000 * y), bay=1, channel=0)
                 self.bsc.move_relative(distance=int(1000 * z), bay=2, channel=0)
-                self.position[0] = self.position[0] - x
-                self.position[1] = self.position[1] - y
-                self.position[2] = self.position[2] - z
+
+                self.position[0] -= x
+                self.position[1] -= y
+                self.position[2] -= z
+
                 if self.calflag:
-                    self.ybank = self.ybank + y
-                    self.xbank = self.xbank + x
-        elif self.minPositionSet is False and self.maxZPositionSet is True:
+                    self.xbank += x
+                    self.ybank += y
+
+        # Case 3: Only maximum Z limit is enforced
+        elif not self.minPositionSet and self.maxZPositionSet:
             if self.position[2] - z >= (self.maxZPosition - 80):
+                # Z motion is below safe limit — block XY motion
                 self.bsc.move_relative(distance=int(1000 * z), bay=2, channel=0)
-                self.position[2] = self.position[2] - z
-                if x != 0 or y !=0:
+                self.position[2] -= z
+
+                if x != 0 or y != 0:
                     print("Please Lift Wedge Probe.")
                     self.atZPosition = True
             else:
+                # Full XYZ movement allowed
                 self.bsc.move_relative(distance=int(1000 * x), bay=0, channel=0)
                 self.bsc.move_relative(distance=int(1000 * y), bay=1, channel=0)
                 self.bsc.move_relative(distance=int(1000 * z), bay=2, channel=0)
-                self.position[0] = self.position[0] - x
-                self.position[1] = self.position[1] - y
-                self.position[2] = self.position[2] - z
+
+                self.position[0] -= x
+                self.position[1] -= y
+                self.position[2] -= z
+
                 if self.calflag:
-                    self.ybank = self.ybank + y
-                    self.xbank = self.xbank + x
+                    self.xbank += x
+                    self.ybank += y
+
+                # Reset wedge probe flag if Z is above limit
                 if self.position[2] <= self.maxZPosition:
                     self.atZPosition = False
-        elif self.minPositionSet is True and self.maxZPositionSet is True:
+
+        # Case 4: Both min X and max Z limits are enforced
+        elif self.minPositionSet and self.maxZPositionSet:
             if self.position[0] - x < self.minXPosition:
                 print("Cannot Move Past Minimum X Position.")
+
             elif self.position[2] - z >= (self.maxZPosition - 80):
+                # Z is too low to safely move XY
                 self.bsc.move_relative(distance=int(1000 * z), bay=2, channel=0)
-                self.position[2] = self.position[2] - z
-                if x != 0 or y !=0:
+                self.position[2] -= z
+
+                if x != 0 or y != 0:
                     print("Please Lift Wedge Probe.")
                     self.atZPosition = True
             else:
+                # Safe to move XYZ
                 self.bsc.move_relative(distance=int(1000 * x), bay=0, channel=0)
                 self.bsc.move_relative(distance=int(1000 * y), bay=1, channel=0)
                 self.bsc.move_relative(distance=int(1000 * z), bay=2, channel=0)
-                self.position[0] = self.position[0] - x
-                self.position[1] = self.position[1] - y
-                self.position[2] = self.position[2] - z
+
+                self.position[0] -= x
+                self.position[1] -= y
+                self.position[2] -= z
+
                 if self.calflag:
-                    self.ybank = self.ybank + y
-                    self.xbank = self.xbank + x
+                    self.xbank += x
+                    self.ybank += y
+
                 if self.position[2] <= self.maxZPosition:
                     self.atZPosition = False
 
